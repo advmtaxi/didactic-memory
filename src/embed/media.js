@@ -96,16 +96,24 @@ export function isSegmentBody(body) {
 }
 
 export function shouldProxyPlaylistUri(abs, playlistUrl) {
-  if (!/^https?:\/\//i.test(abs)) return false
+  if (!/^https?:\/\//i.test(abs)) return false  // handled separately, see below
   try {
     if (new URL(abs).hostname === EMBED_HOST) return false
   } catch {
     return false
   }
 
-  // Only proxy variant playlists (.m3u8), let segments go direct
+  // Only proxy variant playlists, not segments
   if (uriLooksLikeVariant(abs)) return true
-
-  // Don't proxy segments — user's player hits the CDN directly
   return false
+}
+
+// New helper — call this when rewriting playlist lines
+export function resolvePlaylistUri(uri, playlistUrl) {
+  if (/^https?:\/\//i.test(uri)) return uri  // already absolute, leave it
+  try {
+    return new URL(uri, playlistUrl).href     // resolve relative → absolute CDN URL
+  } catch {
+    return uri
+  }
 }
