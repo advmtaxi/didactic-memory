@@ -102,10 +102,8 @@ export function shouldProxyPlaylistUri(abs, playlistUrl) {
   } catch {
     return false
   }
-  if (uriLooksLikeMediaSegment(abs) || uriLooksLikeVariant(abs)) return true
-  try {
-    return new URL(abs).origin === new URL(playlistUrl).origin
-  } catch {
-    return false
-  }
+
+  // Only proxy m3u8 playlists — segments go directly to the CDN
+  if (uriLooksLikeVariant(abs)) return true
+  return false
 }
