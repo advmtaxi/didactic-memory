@@ -5,8 +5,10 @@ import { writeProxyHlsResponse } from '../hls/proxy.js'
 import { resolveStream } from '../stream/resolve.js'
 
 const indexPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../public/index.html')
+const CDN_ORIGIN = process.env.CDN_ORIGIN || null
 
 function requestOrigin(req) {
+  if (CDN_ORIGIN) return CDN_ORIGIN
   const host = req.headers.host || '127.0.0.1:8788'
   const forwarded = req.headers['x-forwarded-proto']
   const proto =
