@@ -99,7 +99,12 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
       continue
     }
     const abs = absMediaUrl(trimmed, baseUrl)
-    if (!shouldProxyPlaylistUri(abs, baseUrl)) continue
+    if (!shouldProxyPlaylistUri(abs, baseUrl)) {
+      // Output as absolute CDN URL directly — player fetches segments straight from source
+      out.push(abs)
+      if (!isM3u8Resource(abs)) segmentLines += 1
+      continue
+    }
     out.push(proxyQuery(abs, embedPath, origin))
     if (!isM3u8Resource(abs)) segmentLines += 1
   }
