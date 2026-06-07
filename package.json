@@ -1,0 +1,12 @@
+{
+  "name": "ppv-stream-resolver",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "happy-dom": "^20.0.10",
+    "impit": "^0.14.1"
+  }
+}
