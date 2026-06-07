@@ -96,24 +96,16 @@ export function isSegmentBody(body) {
 }
 
 export function shouldProxyPlaylistUri(abs, playlistUrl) {
-  if (!/^https?:\/\//i.test(abs)) return false  // handled separately, see below
+  if (!/^https?:\/\//i.test(abs)) return false
   try {
     if (new URL(abs).hostname === EMBED_HOST) return false
   } catch {
     return false
   }
-
-  // Only proxy variant playlists, not segments
-  if (uriLooksLikeVariant(abs)) return true
-  return false
-}
-
-// New helper — call this when rewriting playlist lines
-export function resolvePlaylistUri(uri, playlistUrl) {
-  if (/^https?:\/\//i.test(uri)) return uri  // already absolute, leave it
+  if (uriLooksLikeMediaSegment(abs) || uriLooksLikeVariant(abs)) return true
   try {
-    return new URL(uri, playlistUrl).href     // resolve relative → absolute CDN URL
+    return new URL(abs).origin === new URL(playlistUrl).origin
   } catch {
-    return uri
+    return false
   }
 }
