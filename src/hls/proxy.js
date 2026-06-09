@@ -2,7 +2,7 @@ import { isM3u8Resource, isPoisonPlaylist, shouldProxyPlaylistUri } from '../emb
 import { upstreamFetch } from '../embed/upstream.js'
 
 const PROXY = '/api/hls'
-const BUNNY_DOMAIN = 'https://servesegent.b-cdn.net'
+const BUNNY_DOMAIN = 'https://segmental.b-cdn.net'
 const PLAYLIST_CACHE_TTL_MS = Math.max(0, Number(process.env.HLS_PLAYLIST_CACHE_TTL_MS || 1200))
 
 const playlistInflight = new Map()
