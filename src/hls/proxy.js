@@ -3,6 +3,10 @@ import { upstreamFetch } from '../embed/upstream.js'
 
 const PROXY = '/api/hls'
 const BUNNY_DOMAIN = 'https://servesegent.b-cdn.net'
+const PLAYLIST_CACHE_TTL_MS = Math.max(0, Number(process.env.HLS_PLAYLIST_CACHE_TTL_MS || 1200))
+
+const playlistInflight = new Map()
+const playlistCache = new Map()
 
 function absMediaUrl(uri, baseUrl) {
   return uri.startsWith('http') ? uri : new URL(uri, baseUrl).href
@@ -158,21 +162,51 @@ async function proxySegment(targetUrl, embedPath) {
 async function proxyHlsRequest(targetUrl, embedPath, origin) {
   if (!isM3u8Resource(targetUrl)) return proxySegment(targetUrl, embedPath)
 
-  const upstream = await upstreamFetch(targetUrl, embedPath)
-  if (upstream.status < 200 || upstream.status >= 300) throw new Error(`upstream ${upstream.status}`)
-  const contentType = upstream.headers['content-type'] || upstream.headers['Content-Type'] || ''
-  
-  if (isPlaylist(targetUrl, contentType, upstream.body)) {
-    return {
-      status: 200,
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/vnd.apple.mpegurl',
-      },
-      body: rewriteM3u8(upstream.body.toString('utf8'), targetUrl, embedPath, origin),
-    }
+  const cacheKey = `${targetUrl}::${embedPath || ''}::${origin || ''}`
+  const now = Date.now()
+  const cached = playlistCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) {
+    return cached.response
   }
-  return { status: 200, headers: segmentHeaders(), body: segmentBody(upstream.body) }
+
+  if (playlistInflight.has(cacheKey)) {
+    return playlistInflight.get(cacheKey)
+  }
+
+  const request = (async () => {
+    const upstream = await upstreamFetch(targetUrl, embedPath)
+    if (upstream.status < 200 || upstream.status >= 300) throw new Error(`upstream ${upstream.status}`)
+    const contentType = upstream.headers['content-type'] || upstream.headers['Content-Type'] || ''
+    
+    let response
+    if (isPlaylist(targetUrl, contentType, upstream.body)) {
+      response = {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/vnd.apple.mpegurl',
+        },
+        body: rewriteM3u8(upstream.body.toString('utf8'), targetUrl, embedPath, origin),
+      }
+    } else {
+      response = { status: 200, headers: segmentHeaders(), body: segmentBody(upstream.body) }
+    }
+
+    if (PLAYLIST_CACHE_TTL_MS > 0) {
+      playlistCache.set(cacheKey, {
+        expiresAt: Date.now() + PLAYLIST_CACHE_TTL_MS,
+        response,
+      })
+    }
+    return response
+  })()
+
+  playlistInflight.set(cacheKey, request)
+  try {
+    return await request
+  } finally {
+    playlistInflight.delete(cacheKey)
+  }
 }
 
 export async function writeProxyHlsResponse(res, targetUrl, embedPath, origin) {
