@@ -2,6 +2,7 @@ import { isM3u8Resource, isPoisonPlaylist, shouldProxyPlaylistUri } from '../emb
 import { upstreamFetch } from '../embed/upstream.js'
 
 const PROXY = '/api/hls'
+const BUNNY_DOMAIN = 'https://servesegent.b-cdn.net'
 
 function absMediaUrl(uri, baseUrl) {
   return uri.startsWith('http') ? uri : new URL(uri, baseUrl).href
@@ -90,7 +91,9 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
           trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
             const abs = absMediaUrl(uri, baseUrl)
             if (!shouldProxyPlaylistUri(abs, baseUrl)) return `URI="${uri}"`
-            return `URI="${proxyQuery(abs, embedPath, origin)}"`
+            // Point MAP initialization segments directly to Bunny CDN
+            const urlObj = new URL(abs)
+            return `URI="${BUNNY_DOMAIN}${urlObj.pathname}${urlObj.search}"`
           }),
         )
       } else {
@@ -98,15 +101,25 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
       }
       continue
     }
+    
     const abs = absMediaUrl(trimmed, baseUrl)
+    
     if (!shouldProxyPlaylistUri(abs, baseUrl)) {
-      // Output as absolute CDN URL directly — player fetches segments straight from source
+      // Output as absolute CDN URL directly — player fetches straight from source
       out.push(abs)
       if (!isM3u8Resource(abs)) segmentLines += 1
       continue
     }
-    out.push(proxyQuery(abs, embedPath, origin))
-    if (!isM3u8Resource(abs)) segmentLines += 1
+
+    if (isM3u8Resource(abs)) {
+      // If it's a playlist, proxy it through our local server to rewrite it
+      out.push(proxyQuery(abs, embedPath, origin))
+    } else {
+      // If it's a segment (.ts, .m4s), point it directly to the Bunny Pull Zone
+      const urlObj = new URL(abs)
+      out.push(`${BUNNY_DOMAIN}${urlObj.pathname}${urlObj.search}`)
+      segmentLines += 1
+    }
   }
 
   if (text.includes('#EXTINF:') && segmentLines === 0) {
@@ -146,6 +159,7 @@ async function proxyHlsRequest(targetUrl, embedPath, origin) {
   const upstream = await upstreamFetch(targetUrl, embedPath)
   if (upstream.status < 200 || upstream.status >= 300) throw new Error(`upstream ${upstream.status}`)
   const contentType = upstream.headers['content-type'] || upstream.headers['Content-Type'] || ''
+  
   if (isPlaylist(targetUrl, contentType, upstream.body)) {
     return {
       status: 200,
