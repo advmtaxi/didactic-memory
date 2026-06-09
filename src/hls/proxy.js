@@ -90,7 +90,6 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
         out.push(
           trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
             const abs = absMediaUrl(uri, baseUrl)
-            if (!shouldProxyPlaylistUri(abs, baseUrl)) return `URI="${uri}"`
             // Point MAP initialization segments directly to Bunny CDN
             const urlObj = new URL(abs)
             return `URI="${BUNNY_DOMAIN}${urlObj.pathname}${urlObj.search}"`
@@ -103,22 +102,26 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
     }
     
     const abs = absMediaUrl(trimmed, baseUrl)
-    
-    if (!shouldProxyPlaylistUri(abs, baseUrl)) {
-      // Output as absolute CDN URL directly — player fetches straight from source
-      out.push(abs)
-      if (!isM3u8Resource(abs)) segmentLines += 1
-      continue
-    }
 
+    // Check if it's a playlist (.m3u8) or a media segment (.ts, .m4s)
     if (isM3u8Resource(abs)) {
-      // If it's a playlist, proxy it through our local server to rewrite it
-      out.push(proxyQuery(abs, embedPath, origin))
+      // PLAYLIST LOGIC: Check if we should proxy it through our worker
+      if (!shouldProxyPlaylistUri(abs, baseUrl)) {
+        out.push(abs)
+      } else {
+        out.push(proxyQuery(abs, embedPath, origin))
+      }
     } else {
-      // If it's a segment (.ts, .m4s), point it directly to the Bunny Pull Zone
-      const urlObj = new URL(abs)
-      out.push(`${BUNNY_DOMAIN}${urlObj.pathname}${urlObj.search}`)
-      segmentLines += 1
+      // SEGMENT LOGIC: ALWAYS rewrite to Bunny CDN Pull Zone
+      try {
+        const urlObj = new URL(abs)
+        out.push(`${BUNNY_DOMAIN}${urlObj.pathname}${urlObj.search}`)
+        segmentLines += 1
+      } catch (e) {
+        // Fallback just in case the URL parsing fails
+        out.push(abs)
+        segmentLines += 1
+      }
     }
   }
 
@@ -127,7 +130,6 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
   }
   return out.join('\n')
 }
-
 function isPlaylist(targetUrl, contentType, body) {
   const text = body.toString('utf8', 0, Math.min(body.length, 256))
   if (text.includes('#EXTM3U')) return true
