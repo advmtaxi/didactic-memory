@@ -1,58 +1,36 @@
-import { API_BASE, USER_AGENT } from '../config.js'
 import { resolveEmbedStreamUrl } from '../embed/decrypt.js'
 
 const fail = (stage, error, extra = {}) => ({ ok: false, stage, error, ...extra })
 
-function parseStreamInput(input) {
+function parseEmbedInput(input) {
   const raw =
     typeof input === 'string'
       ? input
-      : input?.url || input?.contentPath || input?.path || input?.uri || ''
-  if (!raw) return { error: 'url required' }
+      : input?.url || input?.embedPath || input?.path || ''
+  if (!raw) return { error: 'embed url or path required' }
 
-  let pathname = String(raw).trim()
-  if (/^https?:\/\//i.test(pathname)) {
+  let embedPath = String(raw).trim()
+
+  // Accept full embedindia.st URLs — extract path after /embed/
+  if (/^https?:\/\//i.test(embedPath)) {
     try {
-      pathname = new URL(pathname).pathname
+      const u = new URL(embedPath)
+      const m = u.pathname.match(/^\/embed\/(.+)/)
+      if (m) {
+        embedPath = m[1]
+      } else {
+        embedPath = u.pathname.replace(/^\/+/, '')
+      }
     } catch {
       return { error: 'invalid url' }
     }
+  } else {
+    // Strip leading /embed/ if passed as a path string
+    embedPath = embedPath.replace(/^\/embed\//, '').replace(/^\/+/, '')
   }
-  if (!pathname.startsWith('/')) pathname = `/${pathname}`
 
-  let uri = pathname.replace(/^\/+/, '')
-  if (uri.startsWith('live/')) uri = uri.slice(5)
-  uri = uri.replace(/^24\/7-/i, '247-')
-  if (!uri) return { error: 'url required' }
-
-  return { uri, contentPath: pathname }
-}
-
-async function fetchStreamMeta(uri) {
-  const res = await fetch(`${API_BASE}/streams/${uri}`, { headers: { 'User-Agent': USER_AGENT } })
-  if (!res.ok) return { error: `upstream ${res.status}` }
-  let json
-  try {
-    json = await res.json()
-  } catch {
-    return { error: 'invalid stream metadata response' }
-  }
-  if (!json?.success || !json?.data) return { error: json?.error || 'empty stream payload' }
-  return { data: json.data }
-}
-
-function pickEmbedSource(data) {
-  const sources = data?.sources || []
-  return sources.find((s) => s.default) || sources.find((s) => s.type === 'iframe') || sources[0] || null
-}
-
-function embedPathFromSource(source, uri) {
-  const raw = String(source?.data || '')
-  if (raw.includes('/embed/')) {
-    const path = new URL(raw).pathname.replace(/^\/embed\//, '')
-    if (path) return path
-  }
-  return uri
+  if (!embedPath) return { error: 'embed path required' }
+  return { embedPath }
 }
 
 function proxiedHlsUrl(origin, streamUrl, embedPath) {
@@ -62,23 +40,16 @@ function proxiedHlsUrl(origin, streamUrl, embedPath) {
 }
 
 export async function resolveStream(input, origin) {
-  const parsed = parseStreamInput(input)
+  const parsed = parseEmbedInput(input)
   if (parsed.error) return fail('input', parsed.error)
 
-  const { uri, contentPath } = parsed
-  const meta = await fetchStreamMeta(uri)
-  if (meta.error) return fail('meta', meta.error, { uri, contentPath })
-
-  const source = pickEmbedSource(meta.data)
-  if (!source?.data) return fail('source', 'no embed source in api response', { uri, contentPath })
-
-  const embedPath = embedPathFromSource(source, uri)
+  const { embedPath } = parsed
   try {
     const streamUrl = await resolveEmbedStreamUrl(embedPath)
-    const result = { ok: true, uri, contentPath, embedPath, streamUrl }
+    const result = { ok: true, embedPath, streamUrl }
     if (origin) result.proxiedUrl = proxiedHlsUrl(origin, streamUrl, embedPath)
     return result
   } catch (err) {
-    return fail('decrypt', String(err.message || err), { uri, contentPath, embedPath })
+    return fail('decrypt', String(err.message || err), { embedPath })
   }
 }
