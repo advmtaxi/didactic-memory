@@ -8,15 +8,26 @@ import {
   sniffMedia,
 } from './media.js'
 
-let client = null
 const FETCH_TIMEOUT_MS = Number(process.env.HLS_FETCH_TIMEOUT_MS || 12000)
 const FETCH_RETRIES = Math.max(0, Number(process.env.HLS_FETCH_RETRIES || 2))
 
 const TRANSIENT_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527])
 
-function getClient() {
-  if (!client) client = new Impit({ browser: 'chrome' })
-  return client
+function createClient() {
+  return new Impit({ browser: 'chrome' })
+}
+
+async function closeClient(client) {
+  for (const methodName of ['close', 'destroy']) {
+    const method = client?.[methodName]
+    if (typeof method !== 'function') continue
+    try {
+      await method.call(client)
+      return
+    } catch {
+      // Try the next cleanup method if the current one is unavailable or fails.
+    }
+  }
 }
 
 function wait(ms) {
@@ -70,49 +81,54 @@ export async function upstreamFetch(url, embedPath) {
   let lastResult = null
   let lastError = null
   const attempts = FETCH_RETRIES + 1
+  const client = createClient()
 
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const res = await withTimeout(
-        getClient().fetch(url, {
-          headers: upstreamHeaders(embedPath),
-          redirect: 'follow',
-        }),
-        FETCH_TIMEOUT_MS,
-      )
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const res = await withTimeout(
+          client.fetch(url, {
+            headers: upstreamHeaders(embedPath),
+            redirect: 'follow',
+          }),
+          FETCH_TIMEOUT_MS,
+        )
 
-      const result = {
-        status: res.status,
-        headers: Object.fromEntries(res.headers.entries()),
-        body: Buffer.from(await res.arrayBuffer()),
-      }
-      lastResult = result
+        const result = {
+          status: res.status,
+          headers: Object.fromEntries(res.headers.entries()),
+          body: Buffer.from(await res.arrayBuffer()),
+        }
+        lastResult = result
 
-      if (result.status >= 200 && result.status < 300) {
-        if (okBody(result.body, url)) return result
+        if (result.status >= 200 && result.status < 300) {
+          if (okBody(result.body, url)) return result
+          if (isPoisonPlaylist(result.body)) throw new Error('upstream playlist blocked')
+        }
+
+        if (attempt < attempts - 1 && (TRANSIENT_STATUS.has(result.status) || isHtmlBody(result.body))) {
+          await wait(150 * (attempt + 1))
+          continue
+        }
+
         if (isPoisonPlaylist(result.body)) throw new Error('upstream playlist blocked')
+        throw new Error(`upstream ${result.status}`)
+      } catch (error) {
+        lastError = error
+        if (attempt < attempts - 1 && isTransientError(error)) {
+          await wait(150 * (attempt + 1))
+          continue
+        }
+        throw error
       }
-
-      if (attempt < attempts - 1 && (TRANSIENT_STATUS.has(result.status) || isHtmlBody(result.body))) {
-        await wait(150 * (attempt + 1))
-        continue
-      }
-
-      if (isPoisonPlaylist(result.body)) throw new Error('upstream playlist blocked')
-      throw new Error(`upstream ${result.status}`)
-    } catch (error) {
-      lastError = error
-      if (attempt < attempts - 1 && isTransientError(error)) {
-        await wait(150 * (attempt + 1))
-        continue
-      }
-      throw error
     }
-  }
 
-  if (lastResult) {
-    if (isPoisonPlaylist(lastResult.body)) throw new Error('upstream playlist blocked')
-    throw new Error(`upstream ${lastResult.status}`)
+    if (lastResult) {
+      if (isPoisonPlaylist(lastResult.body)) throw new Error('upstream playlist blocked')
+      throw new Error(`upstream ${lastResult.status}`)
+    }
+    throw lastError || new Error('upstream unavailable')
+  } finally {
+    await closeClient(client)
   }
-  throw lastError || new Error('upstream unavailable')
 }
