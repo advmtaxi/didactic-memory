@@ -1,4 +1,5 @@
 import { resolveEmbedStreamUrl } from '../embed/decrypt.js'
+import { createSession } from '../hls/sessions.js'
 
 const fail = (stage, error, extra = {}) => ({ ok: false, stage, error, ...extra })
 
@@ -33,9 +34,10 @@ function parseEmbedInput(input) {
   return { embedPath }
 }
 
-function proxiedHlsUrl(origin, streamUrl, embedPath) {
+function proxiedHlsUrl(origin, streamUrl, embedPath, sessionId) {
   const params = new URLSearchParams({ url: streamUrl })
   if (embedPath) params.set('embed', embedPath)
+  if (sessionId) params.set('session', sessionId)
   return `${origin}/api/hls?${params}`
 }
 
@@ -46,8 +48,9 @@ export async function resolveStream(input, origin) {
   const { embedPath } = parsed
   try {
     const streamUrl = await resolveEmbedStreamUrl(embedPath)
-    const result = { ok: true, embedPath, streamUrl }
-    if (origin) result.proxiedUrl = proxiedHlsUrl(origin, streamUrl, embedPath)
+    const sessionId = createSession(embedPath, streamUrl)
+    const result = { ok: true, embedPath, streamUrl, sessionId }
+    if (origin) result.proxiedUrl = proxiedHlsUrl(origin, streamUrl, embedPath, sessionId)
     return result
   } catch (err) {
     return fail('decrypt', String(err.message || err), { embedPath })
