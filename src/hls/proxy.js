@@ -1,23 +1,28 @@
 import { isM3u8Resource, isPoisonPlaylist, shouldProxyPlaylistUri } from '../embed/media.js'
 import { upstreamFetch } from '../embed/upstream.js'
+import { getSession, refreshSessionToken, rewriteUrlWithNewToken } from './sessions.js'
 
 const PROXY = '/api/hls'
 const BUNNY_DOMAIN = 'https://segmental.b-cdn.net'
-const PLAYLIST_CACHE_TTL_MS = Math.max(0, Number(process.env.HLS_PLAYLIST_CACHE_TTL_MS || 1200))
 
+// In-flight dedup — prevents thundering-herd for the same upstream URL
 const playlistInflight = new Map()
-const playlistCache = new Map()
+
+// ── URL helpers ─────────────────────────────────────────────────────
 
 function absMediaUrl(uri, baseUrl) {
   return uri.startsWith('http') ? uri : new URL(uri, baseUrl).href
 }
 
-function proxyQuery(abs, embedPath, origin) {
+function proxyQuery(abs, embedPath, origin, sessionId) {
   const params = new URLSearchParams({ url: abs })
   if (embedPath) params.set('embed', embedPath)
+  if (sessionId) params.set('session', sessionId)
   const path = `${PROXY}?${params}`
   return origin ? `${origin}${path}` : path
 }
+
+// ── Segment helpers ─────────────────────────────────────────────────
 
 function findTsOffset(buf) {
   for (let i = 0; i < Math.min(buf.length, 65536); i++) {
@@ -42,6 +47,8 @@ function segmentBody(body) {
   if (stripped.length >= 188 && stripped[0] === 0x47) return stripped
   throw new Error('invalid segment payload')
 }
+
+// ── Live playlist trimming ──────────────────────────────────────────
 
 function holdBackLiveMediaPlaylist(text, holdSegments = 1) {
   if (!text.includes('#EXTINF:') || text.includes('#EXT-X-ENDLIST') || text.includes('#EXT-X-STREAM-INF')) {
@@ -77,7 +84,9 @@ function holdBackLiveMediaPlaylist(text, holdSegments = 1) {
   return out.join('\n')
 }
 
-function rewriteM3u8(text, baseUrl, embedPath, origin) {
+// ── M3U8 rewriting ──────────────────────────────────────────────────
+
+function rewriteM3u8(text, baseUrl, embedPath, origin, sessionId) {
   const synced = holdBackLiveMediaPlaylist(text)
   const lines = synced.split('\n')
   const out = []
@@ -113,7 +122,7 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
       if (!shouldProxyPlaylistUri(abs, baseUrl)) {
         out.push(abs)
       } else {
-        out.push(proxyQuery(abs, embedPath, origin))
+        out.push(proxyQuery(abs, embedPath, origin, sessionId))
       }
     } else {
       // SEGMENT LOGIC: ALWAYS rewrite to Bunny CDN Pull Zone
@@ -134,6 +143,9 @@ function rewriteM3u8(text, baseUrl, embedPath, origin) {
   }
   return out.join('\n')
 }
+
+// ── Content detection ───────────────────────────────────────────────
+
 function isPlaylist(targetUrl, contentType, body) {
   const text = body.toString('utf8', 0, Math.min(body.length, 256))
   if (text.includes('#EXTM3U')) return true
@@ -142,6 +154,8 @@ function isPlaylist(targetUrl, contentType, body) {
     (contentType.includes('text/plain') && text.includes('#EXT'))
   )
 }
+
+// ── Response headers ────────────────────────────────────────────────
 
 const corsHeaders = {
   'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -153,64 +167,94 @@ const segmentHeaders = () => ({
   'Content-Type': 'video/mp2t',
 })
 
+// ── Token-expiry detection ──────────────────────────────────────────
+
+const TOKEN_EXPIRY_RE = /\b(403|401|410|blocked|forbidden)\b/i
+
+function isTokenExpiryError(err) {
+  return TOKEN_EXPIRY_RE.test(String(err?.message || ''))
+}
+
+// ── Core fetching ───────────────────────────────────────────────────
+
 async function proxySegment(targetUrl, embedPath) {
   const upstream = await upstreamFetch(targetUrl, embedPath)
   if (upstream.status < 200 || upstream.status >= 300) throw new Error(`upstream ${upstream.status}`)
   return { status: 200, headers: segmentHeaders(), body: segmentBody(upstream.body) }
 }
 
-async function proxyHlsRequest(targetUrl, embedPath, origin) {
-  if (!isM3u8Resource(targetUrl)) return proxySegment(targetUrl, embedPath)
+/**
+ * Fetch a playlist from upstream, rewrite it, and return the proxied response.
+ * Uses in-flight dedup so concurrent requests for the same URL share one fetch.
+ */
+async function fetchPlaylist(targetUrl, embedPath, origin, sessionId) {
+  const inflightKey = targetUrl
 
-  const cacheKey = `${targetUrl}::${embedPath || ''}::${origin || ''}`
-  const now = Date.now()
-  const cached = playlistCache.get(cacheKey)
-  if (cached && cached.expiresAt > now) {
-    return cached.response
-  }
-
-  if (playlistInflight.has(cacheKey)) {
-    return playlistInflight.get(cacheKey)
+  if (playlistInflight.has(inflightKey)) {
+    return playlistInflight.get(inflightKey)
   }
 
   const request = (async () => {
     const upstream = await upstreamFetch(targetUrl, embedPath)
     if (upstream.status < 200 || upstream.status >= 300) throw new Error(`upstream ${upstream.status}`)
     const contentType = upstream.headers['content-type'] || upstream.headers['Content-Type'] || ''
-    
-    let response
+
     if (isPlaylist(targetUrl, contentType, upstream.body)) {
-      response = {
+      return {
         status: 200,
         headers: {
           ...corsHeaders,
           'Content-Type': 'application/vnd.apple.mpegurl',
         },
-        body: rewriteM3u8(upstream.body.toString('utf8'), targetUrl, embedPath, origin),
+        body: rewriteM3u8(upstream.body.toString('utf8'), targetUrl, embedPath, origin, sessionId),
       }
-    } else {
-      response = { status: 200, headers: segmentHeaders(), body: segmentBody(upstream.body) }
     }
-
-    if (PLAYLIST_CACHE_TTL_MS > 0) {
-      playlistCache.set(cacheKey, {
-        expiresAt: Date.now() + PLAYLIST_CACHE_TTL_MS,
-        response,
-      })
-    }
-    return response
+    return { status: 200, headers: segmentHeaders(), body: segmentBody(upstream.body) }
   })()
 
-  playlistInflight.set(cacheKey, request)
+  playlistInflight.set(inflightKey, request)
   try {
     return await request
   } finally {
-    playlistInflight.delete(cacheKey)
+    playlistInflight.delete(inflightKey)
   }
 }
 
-export async function writeProxyHlsResponse(res, targetUrl, embedPath, origin) {
-  const proxied = await proxyHlsRequest(targetUrl, embedPath, origin)
+/**
+ * Main entry point for proxying an HLS request.
+ *
+ * If the upstream fetch fails with a token-expiry error and a session is
+ * available, automatically re-resolves a fresh stream URL for the embed path,
+ * rewrites the failing URL with the new token, and retries transparently.
+ */
+async function proxyHlsRequest(targetUrl, embedPath, origin, sessionId) {
+  if (!isM3u8Resource(targetUrl)) return proxySegment(targetUrl, embedPath)
+
+  try {
+    return await fetchPlaylist(targetUrl, embedPath, origin, sessionId)
+  } catch (err) {
+    // ── Auto-refresh on token expiry ──────────────────────────────
+    if (sessionId && isTokenExpiryError(err)) {
+      const session = getSession(sessionId)
+      if (session) {
+        const oldStreamUrl = session.streamUrl
+        const newStreamUrl = await refreshSessionToken(sessionId)
+
+        if (newStreamUrl && newStreamUrl !== oldStreamUrl) {
+          const newTargetUrl = rewriteUrlWithNewToken(targetUrl, oldStreamUrl, newStreamUrl)
+          if (newTargetUrl && newTargetUrl !== targetUrl) {
+            console.log(`[session ${sessionId.slice(0, 8)}] retrying with refreshed token`)
+            return await fetchPlaylist(newTargetUrl, embedPath, origin, sessionId)
+          }
+        }
+      }
+    }
+    throw err
+  }
+}
+
+export async function writeProxyHlsResponse(res, targetUrl, embedPath, origin, sessionId) {
+  const proxied = await proxyHlsRequest(targetUrl, embedPath, origin, sessionId)
   if (res.headersSent) return
   res.writeHead(proxied.status, proxied.headers)
   res.end(proxied.body)
