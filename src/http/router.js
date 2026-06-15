@@ -50,7 +50,9 @@ export async function handleRequest(req, res) {
       const target = url.searchParams.get('url')
       if (!target) return json(res, 400, { error: 'url required' })
       try {
-        await writeProxyHlsResponse(res, target, url.searchParams.get('embed') || undefined, origin)
+        const embedPath = url.searchParams.get('embed') || undefined
+        const sessionId = url.searchParams.get('session') || undefined
+        await writeProxyHlsResponse(res, target, embedPath, origin, sessionId)
       } catch (err) {
         text(res, 502, String(err.message || 'upstream error'))
       }
